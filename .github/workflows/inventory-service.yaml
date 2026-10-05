@@ -1,0 +1,127 @@
+name: inventory-service CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'inventory-service/**'
+      - '.github/workflows/inventory-service.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'inventory-service/**'
+      - '.github/workflows/inventory-service.yaml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment to tag and sync
+        type: choice
+        options: [dev, staging]
+        default: dev
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 599083837640.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: workshop/inventory-service
+  IMAGE_TAG: ${{ github.sha }}
+  SERVICE_DIR: inventory-service
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inventory-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: inventory-service/client-app/package-lock.json
+
+      - name: Build Angular client
+        working-directory: inventory-service/client-app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Restore and build .NET
+        run: |
+          dotnet restore InventoryService.sln
+          dotnet build InventoryService.sln -c Release --no-restore
+
+      - name: Run .NET tests
+        run: dotnet test InventoryService.sln -c Release --no-build --verbosity normal --logger trx --results-directory TestResults
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inventory-service-test-results
+          path: inventory-service/TestResults
+
+      - name: Helm lint
+        run: |
+          helm lint helm/inventory-service -f helm/inventory-service/values.yaml -f helm/inventory-service/values-dev.yaml
+          helm lint helm/inventory-service -f helm/inventory-service/values.yaml -f helm/inventory-service/values-staging.yaml
+
+  build-and-push:
+    name: Push image to ECR
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      env_tag: ${{ steps.tags.outputs.env_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve environment tag
+        id: tags
+        run: echo "env_tag=${{ github.event.inputs.environment || 'dev' }}-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::599083837640:role/github-actions-ecr-push
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        working-directory: inventory-service
+        run: |
+          docker build -f docker/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.tags.outputs.env_tag }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push --all-tags $ECR_REGISTRY/$ECR_REPOSITORY
+
+  argocd-sync:
+    name: Trigger ArgoCD sync
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+      ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+      ARGOCD_APP: inventory-service-${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Install argocd CLI
+        run: |
+          curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+      - name: Sync application
+        run: |
+          argocd app sync "$ARGOCD_APP" --grpc-web --prune
+          argocd app wait "$ARGOCD_APP" --grpc-web --health --timeout 300
