@@ -1,0 +1,35 @@
+replicaCount: 2
+
+image:
+  tag: staging-latest
+
+ingress:
+  hosts:
+    - host: inventory-staging.workshop.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 75
+
+# SQLite is per-pod; a ReadWriteOnce PVC cannot be shared across HPA replicas.
+env:
+  - name: ASPNETCORE_ENVIRONMENT
+    value: Staging
+  - name: ConnectionStrings__DefaultConnection
+    value: "Data Source=inventory.db"
+
+persistence:
+  enabled: false

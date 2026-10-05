@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/.angular/
+**/wwwroot/
+**/*.db
+**/TestResults/
+helm/
+argocd/

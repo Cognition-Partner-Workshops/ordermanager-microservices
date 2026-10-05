@@ -1,0 +1,63 @@
+replicaCount: 1
+
+# Fixed name so other services (e.g. the monolith) can address it as http://inventory-service
+fullnameOverride: inventory-service
+
+image:
+  repository: 599083837640.dkr.ecr.us-east-1.amazonaws.com/workshop/inventory-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  hosts:
+    - host: inventory.workshop.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+env:
+  - name: ASPNETCORE_ENVIRONMENT
+    value: Production
+  - name: ConnectionStrings__DefaultConnection
+    value: "Data Source=/data/inventory.db"
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: gp2
+  mountPath: /data
+
+# In-cluster callers allowed to reach the API (in addition to ingress-nginx).
+# Each entry is a pod label selector; the monolith calls this service over HTTP.
+networkPolicy:
+  allowedClients:
+    - matchLabels:
+        app.kubernetes.io/name: ordermanager
+
+monitoring:
+  enabled: true
+  path: /metrics
+  port: 8080
